@@ -1,0 +1,87 @@
+# Structural PoC of CiscoDevNet/terraform-provider-aci
+# .github/workflows/jira-issue-sync.yml workflow_run trust boundary.
+#
+# Workflow triggers/job condition/permissions are byte-faithful to the target.
+# The step runs the REAL pinned ciscoecosystem/sync-jira-actions source
+# (d5a339e4cfc4bd0cf2c549973f0eb5420f5810d3) with the `jira` network client
+# replaced by poc/jira.py, so observed Jira calls are printed, not performed.
+name: Sync GitHub Issues & Pull Requests to Jira
+
+on:
+  pull_request_target:
+    types:
+      - labeled
+      - unlabeled
+      - opened
+      - edited
+      - closed
+      - reopened
+      - synchronize
+      - converted_to_draft
+      - ready_for_review
+      - review_requested
+  workflow_run:
+    workflows: [jira-issue-sync-pr-review]
+    types:
+      - completed
+  issues:
+  issue_comment:
+
+concurrency:
+  group: jira-sync-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+jobs:
+  sync_issues_to_jira:
+    if: |
+      contains(github.event.issue.labels.*.name, 'jira-sync') ||
+      contains(github.event.pull_request.labels.*.name, 'jira-sync') ||
+      github.event.workflow_run.event == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ciscoecosystem/sync-jira-actions
+          ref: d5a339e4cfc4bd0cf2c549973f0eb5420f5810d3
+          path: action
+      - uses: actions/checkout@v4
+        with:
+          path: pocrepo
+      - name: Install deps
+        run: pip install --quiet "PyGithub==2.2.0" "requests"
+      - name: Report context (reviewed run vs selected PR)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "upstream workflow_run event = ${{ github.event.workflow_run.event }}"
+          echo "upstream workflow_run id    = ${{ github.event.workflow_run.id }}"
+          echo "upstream head branch        = ${{ github.event.workflow_run.head_branch }}"
+          echo "token permissions granted   = issues:write pull-requests:write (job block)"
+      - name: Run pinned sync-jira-actions (Jira client stubbed)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JIRA_URL: https://jira.example.invalid
+          JIRA_PASS: ""
+          JIRA_USER: poc
+          JIRA_PROJECT: DCNE
+          JIRA_COMPONENT: terraform-provider-aci
+          JIRA_ISSUE_TYPE: GitHub Issue
+          INPUT_SYNC_LABEL: jira-sync
+          INPUT_STATUS_FIELD_ID: "10740"
+          INPUT_FIND_JIRA_RETRIES: "0"
+          INPUT_LINK_CLOSING_ISSUES: "true"
+          POC_STUB_ISSUE_STATUS: "Reviewer Approved"
+          POC_STUB_ISSUE_TYPE: "Bug"
+        run: |
+          cp pocrepo/poc/jira.py action/sync_jira_actions/jira.py
+          cd action/sync_jira_actions
+          python3 sync_to_jira.py
+      - name: Resulting state of every open PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr list -R "$GITHUB_REPOSITORY" --state open --json number,title,labels
